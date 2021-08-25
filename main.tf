@@ -1,29 +1,94 @@
 provider "aws" {
-    region = "eu-west-3"
+    region = "eu-central-1"
 }
 
-variable "subnet_cidr_block" {
-  type        = string
-  description = "description"
-}
-
-variable "vpc_cidr_block" {
-  type        = string
-  description = "cidr block for vpc subnet"
-}
-
-resource "aws_vpc" "development-vpc" {
+resource "aws_vpc" "myapp-vpc" {
   cidr_block = var.vpc_cidr_block
   tags = {
-      Name: "cidr block for vpc"
+      Name: "${var.env_prefix}-vpc"
   }
 }
 
-resource "aws_subnet" "dev-subnet-1" {
-  vpc_id = aws_vpc.development-vpc.id
-  cidr_block = var.subnet_cidr_block
-  availability_zone = "eu-west-3a"
+module "myapp-subnet" {
+  source = "./modules/subnet"
+  subnet_cidr_block = var.subnet_cidr_block
+  avail_zone = var.avail_zone
+  env_prefix = var.env_prefix
+  vpc_id = aws_vpc.myapp-vpc.id
+  default_route_table_id = aws_vpc.myapp-vpc.default_route_table_id
+}
+
+resource "aws_default_security_group" "default-sg" {
+  vpc_id = aws_vpc.myapp-vpc.id
+
+  ingress {
+    from_port = 22
+    to_port = 22
+    protocol = "tcp"
+    cidr_blocks = [var.my_ip]
+  }
+
+  ingress {
+    from_port = 8080
+    to_port = 8080
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    prefix_list_ids  = []
+  }
+
   tags = {
-      Name: "subnet-1-dev"
+    Name = "${var.env_prefix}-default-sg"
+  }
+}
+
+data "aws_ami" "latest-amazon-linux-image" {
+  most_recent = true
+  owners = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+resource "aws_key_pair" "ssh-key" {
+  key_name = "server-key"
+  public_key = file(var.public_key_location)
+}
+
+resource "aws_instance" "myapp-server" {
+  ami = data.aws_ami.latest-amazon-linux-image.id
+  instance_type = var.instance_type
+
+  subnet_id = module.myapp-subnet.subnet.id
+  vpc_security_group_ids = [aws_default_security_group.default-sg.id]
+  availability_zone = var.avail_zone
+
+  associate_public_ip_address = true
+  key_name = aws_key_pair.ssh-key.key_name
+
+  #Can be extracted to script and used via file(scriptPath)
+  user_data = <<EOF
+                #!/bin/bash
+                sudo yum update -y && sudo yum install -y docker
+                sudo systemctl start docker
+                sudo usermod -aG docker ec2-user
+                docker run -p 8080:80 nginx
+            EOF
+
+  tags = {
+    Name = "${var.env_prefix}-server"
   }
 }
